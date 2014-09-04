@@ -1,0 +1,150 @@
+#!/usr/bin/python
+
+#===============================================================================
+# This tool helps to automatically convert *.nwco files created by GUIContact
+# to cjob and gpf files, which are autoamtically transferred to the EBEAM.
+# At the ebeam computer the tool nwcp_unpack helps to avoid chaos...
+# 
+# Copyright Daniel Rueffer, EPFL 2012
+#===============================================================================
+import tarfile
+from optparse import OptionParser
+import tempfile
+import os
+import glob
+import shutil
+import re
+from sys import argv as sysargv
+
+usage = "usage: %prog [options] FILE"
+parser = OptionParser(usage=usage)
+    
+
+parser.add_option("-u", "--user", dest="userid",default="",
+                  help="use specific userid", metavar="USER")
+
+
+(options, args) = parser.parse_args()
+
+
+if len(args)!=1:
+    raise ValueError("not enough arguments")
+
+def getCinc(fileName,layer=0):
+    symbol=fileName[:-4]
+    layer=str(int(layer))
+    
+    return """! CATS Y-2006.09-4 amd64 Linux 2.4.21-32.ELsmp PRODUCTION 2008/01/16 10:54:07 139467 
+!Wed Aug  8 07:55:05 2012
+Clear
+Pregrid No
+! ALLOCATE Parameters
+Allocate_rects 100000
+Allocate_traps 100000
+Allocate_space 3000000
+Format GPF
+GPF MAIN_RANGE       1.25 7.8125
+GPF SUB_RANGE        0.078125 0.48828125
+GPF HIGH_TENSION     100
+GPF SUB_BITS         14
+GPF MAX_MSF          512
+GPF RESOLUTION       0.05
+GPF BSS              0.05
+GPF MAIN_RESOLUTION  [7]
+GPF SUB_RESOLUTION   [103]
+GPF MAX_MAIN_FIELD   512 409.6 250
+GPF MAX_SUB_FIELD    8 6.4 4.525
+GPF MAIN_HEIGHT      [35000]
+GPF MAIN_WIDTH       [35000]
+GPF SUB_HEIGHT       [9321]
+GPF SUB_WIDTH        [9321]
+Compact YES
+Height [5000]
+Width [5000]
+Input $TED/%s
+Structure %s
+EXTENT ALL
+Layers %s
+OUTPUT %s
+DO
+EXIT
+    """%((fileName,symbol,layer,symbol))
+
+def getScript():
+    return """#!/usr/bin/python
+
+from optparse import OptionParser
+import tarfile
+import os
+
+usage = "usage: %prog [options] FILE"
+parser = OptionParser(usage=usage)
+
+(options, args) = parser.parse_args()
+
+if len(args)!=1:
+    raise ValueError("not enough arguments")
+
+
+tar=tarfile.open(args[0],mode="r:bz2")
+for member in tar:
+    tar.extract(member)
+tar.close()
+os.system("mv "+args[0][:-5]+".cjob ../jobs/")
+"""
+
+cwd=os.getcwd()
+if options.userid == "":
+    founduser=re.match(r"/home/cad/data/([a-z]+)/.*",os.getcwd()+"/")
+    if founduser == None:
+        raise RuntimeError("no user name found, please use the -u option")
+    user=founduser.groups()[0]
+    print "Username found, using: " + user
+else:
+    user=options.userid
+    
+try:
+    tar=tarfile.open(args[0],mode='r:bz2')
+    tempdir=tempfile.mkdtemp()
+    print "Temp. directory: "+tempdir
+    print "Extracting gds files"
+    for member in tar:
+        tar.extract(member,tempdir)
+    #tar.extractall(tempdir)
+    tar.close()
+    os.chdir(tempdir)
+    files=glob.glob("*.gds")
+    print "Fracturing %d files"%len(files)
+    for f in files:
+        cincFile=open("convert.cinc","w")
+        string=getCinc(f)
+        cincFile.write(string)
+        cincFile.close()
+	os.system("cats convert.cinc")
+    #    call(["cats","convert.cinc"])
+    os.system("writefile *.cflt") ##TODO: -f or something to omit user interaction?
+
+    files = glob.glob("*.gpf")
+    tar=tarfile.open(args[0][:-5]+".nwcc",mode="w:bz2")
+    for f in files:
+	tar.add(f)
+    cjobFile=args[0][:-5]+".cjob"
+    tar.add(cjobFile)	
+    tar.close()
+    string=getScript()
+    f=open("nwcp_unpack","w")
+    f.write(string)
+    f.close()
+    os.system("ebeam_transfer " +args[0][:-5]+".nwcc "+user)
+    os.system("ebeam_transfer nwcp_unpack "+user)
+    os.chdir(cwd)
+    print "removing temp. directory: "+tempdir
+    shutil.rmtree(tempdir)
+except Exception,exc:
+    os.chdir(cwd)
+    try:
+	pass
+        shutil.rmtree(tempdir)
+    except:
+        pass
+    raise RuntimeError(exc)
